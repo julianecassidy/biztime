@@ -4,6 +4,7 @@ const express = require("express");
 const app = require("../app");
 const db = require("../db");
 const { NotFoundError, BadRequestError } = require("../expressError");
+const payments = require("../payments");
 
 const router = new express.Router();
 
@@ -17,7 +18,7 @@ router.get('/', async function (req, res) {
         `SELECT id, comp_code
             FROM invoices`
     )
-    const invoices = (results).rows;
+    const invoices = results.rows;
     return res.json(invoices);
 })
 
@@ -28,7 +29,7 @@ router.get('/', async function (req, res) {
  *   or a 404 if invoice does not exist.
  */
 router.get('/:id', async function (req, res) {
-    const id = req.params.id;
+    const id = Number(req.params.id);
 
     const iResults = await db.query(
         `SELECT id, amt, paid, add_date, paid_date
@@ -63,7 +64,10 @@ router.post('/', async function (req, res) {
         "Company code and invoice amount required.");
 
     const { comp_code, amt } = req.body;
-    if (!comp_code || !amt || isNaN(Number(amt)) || Number(amt) < 0) {
+    if (!comp_code 
+        || amt === undefined 
+        || isNaN(Number(amt)) 
+        || Number(amt) < 0) {
         throw new BadRequestError("Enter a valid company code and amount.")
     };
 
@@ -80,29 +84,65 @@ router.post('/', async function (req, res) {
 
 
 /** POST /invoices: update an invoice in the database
- *  Input: JSON {amt}
+ *  Input: JSON {amt, paid}
  *  Returns: {invoice: {id, comp_code, amt, paid, add_date, paid_date}} or a 404
  *  if the invoice does not exist.
  */
 router.put('/:id', async function (req, res) {
     if (req.body === undefined) throw new BadRequestError();
+    
+    const id = Number(req.params.id);
+    const { amt, paid } = req.body;
+    const invoicePaid = await payments.checkInvoicePaid(id);
+    const date = new Date();
 
-    const id = req.params.id;
-    const { amt } = req.body;
+    console.log(invoicePaid);
 
-    const results = await db.query(
-        `UPDATE invoices
-            SET amt = $1
+    // Check if invoice exists and is already paid
+
+
+    // Paying unpaid invoice: sets paid_date to today
+    if (!invoicePaid && paid) {
+        const results = await db.query(
+            `UPDATE invoices
+            SET amt=$1,
+            paid=$2,
+            paid_date=$3
+            WHERE id = $4
+            RETURNING id, comp_code, amt, paid, add_date, paid_date`,
+            [amt, paid, date, id],
+        );
+        const invoice = results.rows[0];
+        return res.json({ invoice });
+        }
+        
+    // Un-paying: sets paid_date to null
+    if (invoicePaid && !paid) {
+        const results = await db.query(
+            `UPDATE invoices
+            SET amt = $1,
+            paid = FALSE,
+            paid_date = NULL
             WHERE id = $2
             RETURNING id, comp_code, amt, paid, add_date, paid_date`,
+            [amt, id],
+        );
+        const invoice = results.rows[0];
+        return res.json({ invoice });
+        }
+        
+    // No update to payment status: keep same paid_date
+    else {
+        const results = await db.query(
+            `UPDATE invoices
+                SET amt = $1
+                WHERE id = $2
+                RETURNING id, comp_code, amt, paid, add_date, paid_date`,
         [amt, id],
     );
     const invoice = results.rows[0];
-
-    if (!invoice) {
-        throw new NotFoundError(MISSING_INV + id);
-    }
     return res.json({ invoice });
+}
 })
 
 
@@ -110,7 +150,7 @@ router.put('/:id', async function (req, res) {
  *  Return {status: "deleted"} or 404 if invoice does not exist
  */
 router.delete('/:id', async function (req, res) {
-    const id = req.params.id;
+    const id = Number(req.params.id);
 
     const results = await db.query(
         `DELETE FROM invoices 
